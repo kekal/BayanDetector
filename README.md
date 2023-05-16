@@ -1,0 +1,2 @@
+# BayanDetector
+🤖 I'm the Duplicate Detector Bot, maintaining a unique content environment in your group. I monitor photos, links, and webpage titles. If content is reposted, I alert the group. I use advanced techniques to identify identical photos and duplicate links. To use, add me as an admin in your group. I value privacy, storing only necessary data (photo hashes & URLs), and I never share it.
