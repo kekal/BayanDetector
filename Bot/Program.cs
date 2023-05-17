@@ -1,4 +1,5 @@
 ﻿using System.Net;
+using System.Text;
 using System.Xml.Linq;
 using HtmlAgilityPack;
 using OpenCvSharp;
@@ -10,6 +11,7 @@ using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using File = System.IO.File;
+using Size = OpenCvSharp.Size;
 
 
 namespace TelegramBot;
@@ -65,12 +67,14 @@ internal static class TelegramBot
 
 
         _cacheDir = Path.Combine(Directory.GetCurrentDirectory(), _directoryName);
+
+        Console.WriteLine("\nCurrent cache directory: " + Path.GetFullPath(_cacheDir));
+
         _botClient = new TelegramBotClient(_token);
 
         CancellationTokenSource cts = new();
 
         var me = await _botClient.GetMeAsync(cts.Token);
-
         Console.WriteLine($"Start listening for {me.Username} ({me.Id})");
         Console.WriteLine($"User: {(me.IsPremium == true ? "premium" : "")} {me.FirstName} {me.LastName}");
 
@@ -87,19 +91,27 @@ internal static class TelegramBot
     /// <returns>A Task representing the asynchronous operation.</returns>
     private static async Task HandleUpdateAsync(ITelegramBotClient _, Update update, CancellationToken cancellationToken)
     {
-        var message = update.Message;
-        if (message == null || _botClient == null)
+        try
         {
-            return;
+            var message = update.Message;
+            if (message == null || _botClient == null)
+            {
+                return;
+            }
+
+            var channelDir = GetChannelInfo(message);
+
+
+            if (channelDir != null)
+            {
+                await ElaborateAllMessageUrl(message, channelDir, cancellationToken);
+
+                await ProcessPhoto(message, channelDir, cancellationToken);
+            }
         }
-
-        var channelDir = GetChannelInfo(message);
-
-        if (channelDir != null)
+        catch (Exception e)
         {
-            await ElaborateAllMessageUrl(message, channelDir, cancellationToken);
-
-            await ProcessPhoto(message, channelDir, cancellationToken);
+            Console.WriteLine(FormatException(e));
         }
     }
 
@@ -135,8 +147,9 @@ internal static class TelegramBot
     /// <param name="originalMessageId">The ID of the message that will be pointed as original content.</param>
     /// <param name="chatId">The ID of the chat.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
+    /// <param name="count"></param>
     /// <returns>A task that represents the asynchronous operation.</returns>
-    private static async Task SendInfo2Chat(int originalMessageId, long chatId, CancellationToken cancellationToken)
+    private static async Task SendInfo2Chat(int originalMessageId, long chatId, CancellationToken cancellationToken, int count = 0)
     {
         if (_botClient != null)
         {
@@ -144,7 +157,7 @@ internal static class TelegramBot
             {
                 await _botClient.SendTextMessageAsync(
                     chatId: chatId,
-                    text: MessageText,
+                    text: count <= 0 ? MessageText : $"{MessageText}\nImage similarity: {count}/{SomeThreshold}",
                     replyToMessageId: originalMessageId,
                     cancellationToken: cancellationToken);
             }
@@ -237,8 +250,7 @@ internal static class TelegramBot
     /// <returns>A task that represents the asynchronous operation.</returns>
     private static async Task AddUrl2Bd(string? url, string? description, Message message, string channelDir)
     {
-        var originalMessageId = await GetExistingEntityMessageIdFromBd(channelDir, message,
-            u =>
+        var originalMessageId = await GetExistingEntityMessageIdFromBd(channelDir, message, u =>
                    string.Equals(u.Attribute("url")?.Value, url, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(u.Attribute("description")?.Value, description, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(u.Attribute("messageId")?.Value, message.MessageId.ToString(), StringComparison.OrdinalIgnoreCase));
@@ -246,16 +258,18 @@ internal static class TelegramBot
         if (originalMessageId <= 0)
         {
             var xmlFilePath = EnsureBdExists(channelDir);
+            lock (_botClient!)
+            {
+                var doc = XDocument.Load(xmlFilePath);
+                var urlElement = new XElement("message",
+                    new XAttribute("url", url ?? string.Empty),
+                    new XAttribute("messageId", message.MessageId),
+                    new XAttribute("description", description ?? string.Empty)
+                );
+                doc.Root?.Add(urlElement);
 
-            var doc = XDocument.Load(xmlFilePath);
-            var urlElement = new XElement("message",
-                new XAttribute("url", url ?? string.Empty),
-                new XAttribute("messageId", message.MessageId),
-                new XAttribute("description", description ?? string.Empty)
-            );
-            doc.Root?.Add(urlElement);
-
-            doc.Save(xmlFilePath);
+                doc.Save(xmlFilePath);
+            }
         }
     }
 
@@ -269,7 +283,13 @@ internal static class TelegramBot
         var xmlFilePath = EnsureBdExists(channelDir);
 
         var originalMessageId = 0;
-        var foundSimilarMessages = XDocument.Load(xmlFilePath)
+        XDocument xDocument;
+        lock (_botClient!)
+        {
+            xDocument = XDocument.Load(xmlFilePath);
+        }
+
+        var foundSimilarMessages = xDocument
             .Descendants("message")
             .Where(u => entityComparisonRule(u) && u.Attribute("messageId")?.Value != null)
             .Select(u => int.Parse(u.Attribute("messageId")?.Value!)).ToList();
@@ -313,7 +333,7 @@ internal static class TelegramBot
         }
         if (!isMessageExists)
         {
-            await RemoveFromDb(originalMessageId, channelDir, xmlFilePath);
+            RemoveFromDb(originalMessageId, channelDir, xmlFilePath);
         }
         return isMessageExists;
     }
@@ -323,19 +343,18 @@ internal static class TelegramBot
     /// <param name="channelDir">The directory of the channel.</param>
     /// <param name="xmlFilePath">The path of the XML file.</param>
     /// <returns>A task that represents the asynchronous operation.</returns>
-    private static async Task RemoveFromDb(int originalMessageId, string channelDir, string xmlFilePath)
+    private static void RemoveFromDb(int originalMessageId, string channelDir, string xmlFilePath)
     {
-        var doc = XDocument.Load(xmlFilePath);
-        var elementToRemove = doc.Descendants("message").FirstOrDefault(urlElement => urlElement.Attribute("messageId")?.Value == originalMessageId.ToString());
-
-        if (elementToRemove != null)
+        lock (_botClient!)
         {
-            elementToRemove.Remove();
-            await Task.Run(() =>
-            {
-                doc.Save(xmlFilePath);
+            var doc = XDocument.Load(xmlFilePath);
 
-            }).WaitAsync(TimeSpan.FromSeconds(10));
+            var elementToRemove = doc.Descendants("message").FirstOrDefault(urlElement => urlElement.Attribute("messageId")?.Value == originalMessageId.ToString());
+            if (elementToRemove != null)
+            {
+                elementToRemove.Remove();
+                doc.Save(xmlFilePath);
+            }
         }
         File.Delete(Path.Combine(channelDir, $"{originalMessageId}.jpg"));
     }
@@ -396,12 +415,12 @@ internal static class TelegramBot
         {
             using var resizedImage = Downscale(newImage);
 
-            var originalMessageId = await GetDuplicateMessageId(message, channelDir, GetImageDescriptors(resizedImage));
+            var (originalMessageId,count) = await GetDuplicateMessageId(message, channelDir, GetImageDescriptors(resizedImage));
 
             if (originalMessageId != 0)
             {
                 //var originalMessageLink = $"https://t.me/c/{chatId}/{originalMessageId}";
-                await SendInfo2Chat(originalMessageId, message.Chat.Id, cancellationToken);
+                await SendInfo2Chat(originalMessageId, message.Chat.Id, cancellationToken, count);
                 ret = true;
             }
             else
@@ -430,9 +449,11 @@ internal static class TelegramBot
     /// <param name="message">The message to check the originality.</param>
     /// <param name="channelDir">The channel directory to search for the duplicate images.</param>
     /// <param name="newImageDescriptors">The given image descriptors to compare against.</param>
+    /// <param name="count"></param>
     /// <returns>The duplicate message ID, or 0 if no duplicate message ID was found.</returns>
-    private static async Task<int> GetDuplicateMessageId(Message message, string channelDir, Mat newImageDescriptors)
+    private static async Task<(int originalMessageId, int count)> GetDuplicateMessageId(Message message, string channelDir, Mat newImageDescriptors)
     {
+        var count = 0;
         var similarImageFile = Directory
             .EnumerateFiles(channelDir, "*.jpg")
             .OrderBy(Path.GetFileNameWithoutExtension)
@@ -442,7 +463,12 @@ internal static class TelegramBot
                 var oldImageDescriptors = GetImageDescriptors(oldImage);
 
                 var matches = CompareImages(oldImageDescriptors, newImageDescriptors);
-                return matches.Count > SomeThreshold;
+                var isMatched = matches.Count > SomeThreshold;
+                if (isMatched)
+                {
+                    count = matches.Count;
+                }
+                return isMatched;
             });
 
         similarImageFile = NormalizeFileName(similarImageFile);
@@ -458,7 +484,7 @@ internal static class TelegramBot
             originalMessageId = 0;
         }
 
-        return originalMessageId;
+        return (originalMessageId, count);
     }
 
     /// <summary> Retrieves the title, description, and image URL from an HTML page. </summary>
@@ -629,7 +655,13 @@ internal static class TelegramBot
         var xmlFilePath = Path.Combine(channelDir, "Urls.xml");
         if (!File.Exists(xmlFilePath))
         {
-            new XDocument(new XElement("message")).Save(xmlFilePath);
+            Console.WriteLine(41);
+            lock (_botClient!)
+            {
+                Console.WriteLine(42);
+                new XDocument(new XElement("message")).Save(xmlFilePath);
+            }
+            Console.WriteLine(43);
         }
 
         return xmlFilePath;
@@ -677,5 +709,32 @@ internal static class TelegramBot
         return matches
             .Where(match => match.Length > 1 && match[0].Distance < 0.75f * match[1].Distance)
             .Select(match => match[0]).ToList();
+    }
+
+    private static string FormatException(Exception e)
+    {
+        StringBuilder sb = new();
+        FormatExceptionInternal(e, sb, string.Empty);
+        return sb.ToString();
+    }
+
+
+    private static void FormatExceptionInternal(Exception e, StringBuilder sb, string indent)
+    {
+        if (indent.Length > 0)
+        {
+            sb.Append($"{indent}Inner ");
+        }
+
+        sb.Append($"Exception Found:\n{indent}Type: {e.GetType().FullName}");
+        sb.Append($"\n{indent}Message: {e.Message}");
+        sb.Append($"\n{indent}Source: {e.Source}");
+        sb.Append($"\n{indent}StackTrace: {e.StackTrace}");
+
+        if (e.InnerException != null)
+        {
+            sb.Append("\n");
+            FormatExceptionInternal(e.InnerException, sb, indent + "  ");
+        }
     }
 }
