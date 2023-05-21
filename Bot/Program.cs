@@ -27,6 +27,8 @@ internal static class TelegramBot
     private static CancellationTokenSource? _cts;
     private const int TempChatId = 109671846;
     private const string MessageText = "It looks like similar content has already been posted here ↑";
+    private static int _lastMessageId = 375890;
+
 
 
     public static async Task Main(string[] args)
@@ -99,8 +101,20 @@ internal static class TelegramBot
                 return;
             }
 
-            var channelDir = GetChannelInfo(message);
+            var messageCaption = (message.Text + message.Caption).Trim();
+            if (messageCaption.StartsWith("BD delete last", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    await _botClient!.DeleteMessageAsync(message.Chat.Id, _lastMessageId, cancellationToken);
+                }
+                catch
+                {
+                    // ignored
+                }
+            }
 
+            var channelDir = GetChannelInfo(message);
 
             if (channelDir != null)
             {
@@ -155,11 +169,13 @@ internal static class TelegramBot
         {
             try
             {
-                await _botClient.SendTextMessageAsync(
+                var mess = await _botClient.SendTextMessageAsync(
                     chatId: chatId,
                     text: count <= 0 ? MessageText : $"{MessageText}\nImage similarity: {count}/{SomeThreshold}",
                     replyToMessageId: originalMessageId,
                     cancellationToken: cancellationToken);
+
+                _lastMessageId = mess.MessageId;
             }
             catch (Exception e)
             {
@@ -180,6 +196,7 @@ internal static class TelegramBot
         {
             allEntityValues = ParseUrlInMessage(message.Entities, message.EntityValues!);
         }
+
         if (message.CaptionEntities != null)
         {
             allEntityValues = allEntityValues.Concat(ParseUrlInMessage(message.CaptionEntities, message.CaptionEntityValues!));
@@ -232,8 +249,8 @@ internal static class TelegramBot
             else if (contentType.StartsWith("text/"))
             {
                 var webPreview = await GetHtmlPreview(url);
-                await ProcessTitle(webPreview.Title, url, message, channelDir, cancellationToken);
-                await ProcessImageUrl(webPreview.ImageUrl, message, channelDir, cancellationToken);
+                //await ProcessTitle(webPreview.Title, url, message, channelDir, cancellationToken);
+                //await ProcessImageUrl(webPreview.ImageUrl, message, channelDir, cancellationToken);
             }
             else
             {
