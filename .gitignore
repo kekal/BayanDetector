@@ -1,3 +1,4 @@
 .vs/
-Bot/bin/
-Bot/obj/
+**/bin/
+**/obj/
+New folder/
