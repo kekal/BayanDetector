@@ -1,5 +1,4 @@
-﻿using System.Configuration;
-using System.Net;
+﻿using System.Net;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
@@ -14,7 +13,6 @@ using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Tesseract;
 using File = System.IO.File;
-using JsonSerializer = System.Text.Json.JsonSerializer;
 using Size = OpenCvSharp.Size;
 
 namespace TelegramBot;
@@ -31,6 +29,7 @@ public class MessageOperations
     private readonly int _messageId;
     private readonly string? _mediaGroup;
     private bool _answered;
+    private const double TextSimilarityThreshold = 0.7;
     private const double OcrConfidenceThreshold = 0.6;
     private const int MinimalTextSizeToDrop = 40;
     private const string OcrModelFolder = @"./tessdata";
@@ -391,7 +390,7 @@ public class MessageOperations
                 .GetSimilarity(
                     (u.Attribute("description")?.Value ?? "").ToLower(),
                     title.ToLower())
-            > 0.6);
+            > TextSimilarityThreshold);
 
         if (originalMessageId > 0)
         {
@@ -582,12 +581,12 @@ public class MessageOperations
     {
         var (title, imageUrl) = await FilterWhiteListUrls(url);
 
-        if (imageUrl !=  null || title !=null)
+        if (imageUrl != null || title != null)
         {
             return (title, imageUrl);
         }
 
-        var web = new HtmlWeb { UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36" };
+        var web = new HtmlWeb { UserAgent = "curl/8.0.1" };
         var doc = await web.LoadFromWebAsync(url, _cancellationToken);
 
         var titleNode = doc.DocumentNode.SelectSingleNode("//meta[@property='og:title']") ??
@@ -599,6 +598,11 @@ public class MessageOperations
 
         title = titleNode?.Name == "meta" ? titleNode.GetAttributeValue("content", "") : titleNode?.InnerText;
         title = title != null ? WebUtility.HtmlDecode(title) : null;
+
+        if (title?.Length < MinimalTextSizeToDrop)
+        {
+            title = null;
+        }
         // var description = descriptionNode?.GetAttributeValue("content", "");
         imageUrl = imageUrlNode?.GetAttributeValue("content", "");
 
@@ -607,34 +611,37 @@ public class MessageOperations
 
     private async Task<(string? title, string? imageUrl)> FilterWhiteListUrls(string? url)
     {
-        if (url != null && url.Contains("twitter.com"))
-        {
-            var match = Regex.Match(url, @"status/(\d+)");
-            if (match.Success)
-            {
-                var tweetId = match.Groups[1].Value;
-
-                using var client = new HttpClient();
-                client.DefaultRequestHeaders.Add("Authorization", $"Bearer {ConfigurationManager.AppSettings.Get("token")}");
-                var endpoint = $"https://api.twitter.com/1.1/statuses/show/{tweetId}.json";
-
-                var response = await client.GetAsync(endpoint, _cancellationToken);
-
-                if (response.IsSuccessStatusCode)
-                {
-                    var responseBody = await response.Content.ReadAsStringAsync(_cancellationToken);
-                    var tweetData = JsonSerializer.Deserialize<Tweet>(responseBody);
-
-                    if (tweetData != null)
-                    {
-                        var title = tweetData.Text;
-                        var imageUrl = tweetData.Entities?.Media?.FirstOrDefault(u => u?.MediaUrlHttps != null)?.MediaUrlHttps;
-                        await ProcessImageUrl(imageUrl);
-                        return (title, imageUrl);
-                    }
-                }
-            }
-        }
+        // if (url != null && url.Contains("twitter.com"))
+        // {
+        //     var match = Regex.Match(url, @"status/(\d+)");
+        //     if (match.Success)
+        //     {
+        //         var tweetId = match.Groups[1].Value;
+        //
+        //         using var client = new HttpClient();
+        //         client.DefaultRequestHeaders.Add("Authorization", $"Bearer {ConfigurationManager.AppSettings.Get("token")}");
+        //         var endpoint = $"https://api.twitter.com/1.1/statuses/show/{tweetId}.json";
+        //
+        //         var response = await client.GetAsync(endpoint, _cancellationToken);
+        //
+        //         if (response.IsSuccessStatusCode)
+        //         {
+        //             var responseBody = await response.Content.ReadAsStringAsync(_cancellationToken);
+        //             var tweetData = JsonSerializer.Deserialize<Tweet>(responseBody);
+        //
+        //             if (tweetData != null)
+        //             {
+        //                 var title = tweetData.Text;
+        //                 var imageUrl = tweetData.Entities?.Media?.FirstOrDefault(u => u?.MediaUrlHttps != null)?.MediaUrlHttps;
+        //                 if (imageUrl != null)
+        //                 {
+        //                     await ProcessImageUrl(imageUrl);
+        //                     return (title, url);
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
 
         return (null, null);
     }
@@ -718,16 +725,20 @@ public class MessageOperations
             uri = new Uri(url);
         }
 
-        var uriAbsoluteUri = uri?.AbsoluteUri;
+        var asoluteUri = uri?.AbsoluteUri;
 
 
-        if (uriAbsoluteUri != null && uriAbsoluteUri.Contains("://twitter.com"))
+        if (asoluteUri != null && asoluteUri.Contains("twitter.com"))
         {
-            uriAbsoluteUri = uriAbsoluteUri.Replace("twitter.com", "fxtwitter.com");
+            if (asoluteUri.Contains("://twitter.com"))
+            {
+                asoluteUri = asoluteUri.Replace("twitter.com", "fxtwitter.com");
+            }
+            
+            asoluteUri = new Uri(asoluteUri).GetLeftPart(UriPartial.Path);
         }
 
-
-        return uriAbsoluteUri;
+        return asoluteUri;
     }
 
     /// <summary> Normalizes a file name by removing the any trailing underscores and distinction postfixes. </summary>
