@@ -36,7 +36,7 @@ public class MessageOperations
     private const int ThumbnailSize = 400;
     private const int TempChatId = 109671846;
     private const string MessageText = "It looks like similar content has already been posted here ↑";
-    private static readonly List<string> ExcludedHosts = new List<string> { @"store.steampowered.com" };
+    private static readonly List<string> ExcludedHosts = new() { @"store.steampowered.com" };
 
 
     public MessageOperations(ITelegramBotClient telegramBotClient, Message message, CancellationToken cancellationToken)
@@ -511,7 +511,7 @@ public class MessageOperations
         KeyPoint[] oldKeyPoints = null!;
         var similarImageFile = Directory
             .EnumerateFiles(_channelDir, "*.jpg")
-            .OrderBy(Path.GetFileNameWithoutExtension)
+            .OrderByDescending(Path.GetFileNameWithoutExtension)
             .FirstOrDefault(f =>
             {
                 oldImage = Cv2.ImRead(f, ImreadModes.Color);
@@ -852,30 +852,4 @@ public class MessageOperations
 
         return channelDir;
     }
-}
-public class Tweet
-{
-
-    [JsonPropertyName("text")]
-    public string Text { get; set; }
-
-    [JsonPropertyName("entities")]
-    public Entities? Entities { get; set; }
-
-}
-
-public class Entities
-{
-    [JsonPropertyName("media")]
-    public List<Media?>? Media { get; set; }
-}
-
-
-public class Media
-{
-    [JsonPropertyName("media_url_https")]
-    public string? MediaUrlHttps { get; set; }
-
-    [JsonPropertyName("expanded_url")]
-    public string? ExpandedUrl { get; set; }
 }

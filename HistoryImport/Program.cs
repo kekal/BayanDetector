@@ -57,19 +57,20 @@ internal static class HistoryImport
                         File.Delete(newImagePath);
                         DownScale(sourceFileName, newImagePath);
                     }
+                }
 
-                    if (hasUrl)
+                if (hasUrl)
+                {
+                    foreach (var url in urls!)
                     {
-                        foreach (var url in urls!)
-                        {
-                            var urlMessageElement = new XElement("message");
-                            urlMessageElement.SetAttributeValue("messageId", messageId);
-                            urlMessageElement.SetAttributeValue("url", url);
-                            urlMessageElement.SetAttributeValue("description", "");
-                            rootElement.Add(urlMessageElement);
-                        }
+                        var urlMessageElement = new XElement("message");
+                        urlMessageElement.SetAttributeValue("messageId", messageId);
+                        urlMessageElement.SetAttributeValue("url", url);
+                        urlMessageElement.SetAttributeValue("description", "");
+                        rootElement.Add(urlMessageElement);
                     }
                 }
+
             }
         }
 
