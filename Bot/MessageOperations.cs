@@ -22,7 +22,7 @@ public class MessageOperations
     private readonly ITelegramBotClient _telegramBotClient;
     private readonly Message _message;
     private readonly CancellationToken _cancellationToken;
-    private const int SomeThreshold = 80;
+    private const int SomeThreshold = 60;
     private readonly string _channelDir;
     private readonly string _xmlFilePath;
     private readonly long _chatId;
@@ -31,11 +31,12 @@ public class MessageOperations
     private bool _answered;
     private const double TextSimilarityThreshold = 0.7;
     private const double OcrConfidenceThreshold = 0.6;
-    private const int MinimalTextSizeToDrop = 40;
+    private const int MinimalTextSizeToDrop = 60;
     private const string OcrModelFolder = @"./tessdata";
     private const int ThumbnailSize = 400;
     private const int TempChatId = 109671846;
     private const string MessageText = "It looks like similar content has already been posted here ↑";
+    private static readonly List<string> ExcludedHosts = new List<string> { @"store.steampowered.com" };
 
 
     public MessageOperations(ITelegramBotClient telegramBotClient, Message message, CancellationToken cancellationToken)
@@ -57,12 +58,11 @@ public class MessageOperations
 
     internal async Task PerformOperations()
     {
+        await ProcessPhoto();
         var urls = ElaborateAllMessageUrl();
-        var photos = ProcessPhoto();
         var videos = ProcessVideo();
         var gif = ProcessAnimation();
-
-        await Task.WhenAll(urls, photos, videos, gif);
+        await Task.WhenAll(urls, videos, gif);
     }
 
     private async Task ProcessAnimation()
@@ -268,7 +268,10 @@ public class MessageOperations
                 }
                 if (imageUrl != null)
                 {
-                    //await ProcessImageUrl(imageUrl);
+                    if (!ExcludedHosts.Any(url.Contains))
+                    {
+                        await ProcessImageUrl(imageUrl);
+                    }
                 }
             }
             else
@@ -605,6 +608,7 @@ public class MessageOperations
         }
         // var description = descriptionNode?.GetAttributeValue("content", "");
         imageUrl = imageUrlNode?.GetAttributeValue("content", "");
+        imageUrl = imageUrl != null ? WebUtility.HtmlDecode(imageUrl) : null;
 
         return (title, imageUrl);
     }
