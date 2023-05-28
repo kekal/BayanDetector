@@ -1,4 +1,6 @@
-﻿using System.Net;
+﻿using System.Configuration;
+using System.Net;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
@@ -250,7 +252,6 @@ public class MessageOperations
     /// <returns>A task that represents the asynchronous operation.</returns>
     private async Task ProcessSingleUrlContent(string url)
     {
-
         var contentType = await GetMime(url);
         if (contentType != null)
         {
@@ -615,6 +616,30 @@ public class MessageOperations
 
     private async Task<(string? title, string? imageUrl)> FilterWhiteListUrls(string? url)
     {
+        if (url != null && url.Contains("t.me"))
+        {
+            var web = new HtmlWeb { UserAgent = "curl/8.0.1" };
+            var doc = await web.LoadFromWebAsync(url, _cancellationToken);
+
+            // var titleNode = doc.DocumentNode.SelectSingleNode("//meta[@property='og:title']") ??
+                            // doc.DocumentNode.SelectSingleNode("//head/title");
+
+            var descriptionNode = doc.DocumentNode.SelectSingleNode("//meta[@property='og:description']") ?? doc.DocumentNode.SelectSingleNode("//meta[@name='description']");
+
+            // var imageUrlNode = doc.DocumentNode.SelectSingleNode("//meta[@property='og:image']");
+
+            var title = descriptionNode?.Name == "meta" ? descriptionNode.GetAttributeValue("content", "") : descriptionNode?.InnerText;
+            title = title != null ? WebUtility.HtmlDecode(title) : null;
+
+            if (title?.Length < MinimalTextSizeToDrop)
+            {
+                title = null;
+            }
+
+            return (title, null);
+        }
+
+
         // if (url != null && url.Contains("twitter.com"))
         // {
         //     var match = Regex.Match(url, @"status/(\d+)");
