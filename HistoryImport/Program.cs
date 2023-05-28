@@ -12,8 +12,8 @@ internal static class HistoryImport
     private static void Main()
     {
         // Specify source and target directories
-        var sourceDirectory = @"";
-        var targetDirectory = @"";
+        var sourceDirectory = @"C:\Users\YuriiKikalo\Downloads\Telegram Desktop\ChatExport_2023-05-26 (1)";
+        var targetDirectory = @"C:\backup\downloads\temp\ConsoleApp14\New folder";
 
         Directory.CreateDirectory(targetDirectory);
 

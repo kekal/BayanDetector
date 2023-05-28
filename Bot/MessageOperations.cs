@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using HtmlAgilityPack;
+using Newtonsoft.Json;
 using OpenCvSharp;
 using OpenCvSharp.Extensions;
 using OpenCvSharp.XFeatures2D;
@@ -84,23 +85,32 @@ public class MessageOperations
     {
         if (photo?.FileId != null)
         {
-            var file = await _telegramBotClient.GetFileAsync(photo.FileId, _cancellationToken);
+            var photoTempPath = await DownloadEmbeddedImage(photo);
 
-            if (file.FilePath == null)
+            if (photoTempPath != null)
             {
-                Console.WriteLine(
-                    $@"Telegram message is not well-formed. Image {file.FileId} in the message {_message.MessageId} does not exists.");
-                return;
+                await ProcessStoredImage(photoTempPath);
             }
-
-            var photoTempPath = Path.Combine(TelegramBot.CacheDir, _chatId.ToString(), Guid.NewGuid().ToString());
-            await using (var fileStream = new FileStream(photoTempPath, FileMode.Create))
-            {
-                await _telegramBotClient.DownloadFileAsync(file.FilePath, fileStream, _cancellationToken);
-            }
-
-            await ProcessStoredImage(photoTempPath);
         }
+    }
+
+    private async Task<string?> DownloadEmbeddedImage(FileBase photo)
+    {
+        var file = await _telegramBotClient.GetFileAsync(photo.FileId, _cancellationToken);
+
+        if (file.FilePath == null)
+        {
+            Console.WriteLine($@"Telegram message is not well-formed. Image {file.FileId} in the message {_message.MessageId} does not exists.");
+            return null;
+        }
+
+        var photoTempPath = Path.Combine(TelegramBot.CacheDir, _chatId.ToString(), Guid.NewGuid().ToString());
+
+        await using var fileStream = new FileStream(photoTempPath, FileMode.Create);
+
+        await _telegramBotClient.DownloadFileAsync(file.FilePath, fileStream, _cancellationToken);
+
+        return photoTempPath;
     }
 
     /// <summary> Sends a text message to a chat using the bot client. </summary>
@@ -183,7 +193,7 @@ public class MessageOperations
     /// <returns>A task representing the asynchronous operation.</returns>
     private async Task ProcessSingleUrl(string url)
     {
-        var originalMessageId = await GetExistingMessageIdFromBd(u =>
+        var originalMessageId = await GetExistingMessageId(u =>
         {
             try
             {
@@ -221,10 +231,8 @@ public class MessageOperations
     /// <summary> Gets the existing entity message identifier from the database and checks if this message still exists. </summary>
     /// <param name="entityComparisonRule">The xml records comparison predicate.</param>
     /// <returns>The existing entity message identifier.</returns>
-    private async Task<int> GetExistingMessageIdFromBd(Func<XElement, bool> entityComparisonRule)
+    private async Task<(int originalMessageId, string?)> GetExistingMessageId(Func<XElement, bool> entityComparisonRule)
     {
-
-        var originalMessageId = 0;
         XDocument doc;
         lock (_telegramBotClient)
         {
@@ -238,11 +246,13 @@ public class MessageOperations
      
         if (foundSimilarMessages.Any())
         {
-            originalMessageId = foundSimilarMessages.Min();
-            return await IsMessageExistsOnline(originalMessageId) ? originalMessageId : 0;
+            var originalMessageId = foundSimilarMessages.Min();
+            var photoPath = await GetMediaIfMessageExistsOnline(originalMessageId);
+
+            return (originalMessageId, photoPath);
         }
 
-        return 0;
+        return default;
     }
 
     /// <summary> Processes a URL downloaded content by determining the content type and processing the URL accordingly. </summary>
@@ -289,7 +299,7 @@ public class MessageOperations
     {
         var url1 = string.IsNullOrWhiteSpace(url) ? "\\uri" : url;
 
-        var originalMessageId = await GetExistingMessageIdFromBd(u =>
+        var originalMessageId = await GetExistingMessageId(u =>
             string.Equals(u.Attribute("url")?.Value, url1, StringComparison.OrdinalIgnoreCase)
             || string.Equals(u.Attribute("description")?.Value, description, StringComparison.OrdinalIgnoreCase)
             || string.Equals(u.Attribute("messageId")?.Value, _messageId.ToString(), StringComparison.OrdinalIgnoreCase));
@@ -314,19 +324,30 @@ public class MessageOperations
     /// <summary> Checks if a message exists in a chat. </summary>
     /// <param name="originalMessageId">The original message id.</param>
     /// <returns> A Boolean value indicating whether the message exists. </returns>
-    private async Task<bool> IsMessageExistsOnline(int originalMessageId)
+    private async Task<string?> GetMediaIfMessageExistsOnline(int originalMessageId)
     {
         if (string.IsNullOrWhiteSpace(_xmlFilePath))
         {
-            return false;
+            return default;
         }
 
-        var isMessageExists = false;
+        string? imagePath = null;
+
         try
         {
-            var tempMessageId = await _telegramBotClient.CopyMessageAsync(TempChatId, _chatId, originalMessageId, cancellationToken: _cancellationToken);
-            await _telegramBotClient.DeleteMessageAsync(TempChatId, tempMessageId.Id, cancellationToken: _cancellationToken);
-            isMessageExists = true;
+            // var tempMessageId = await _telegramBotClient.CopyMessageAsync(TempChatId, _chatId, originalMessageId, cancellationToken: _cancellationToken);
+            var tempMessage = await _telegramBotClient.ForwardMessageAsync(chatId: TempChatId, fromChatId: _chatId, originalMessageId, cancellationToken: _cancellationToken);
+
+            imagePath = string.Empty;
+
+            var photo = tempMessage.Photo?.MaxBy(x => x.FileSize);
+
+            if (photo != null)
+            {
+                imagePath = await DownloadEmbeddedImage(photo);
+            }
+
+            await _telegramBotClient.DeleteMessageAsync(TempChatId, tempMessage.MessageId, cancellationToken: _cancellationToken);
         }
         catch (ApiRequestException e)
         {
@@ -346,7 +367,7 @@ public class MessageOperations
             Console.WriteLine(TelegramBot.FormatException(e));
         }
 
-        return isMessageExists;
+        return imagePath;
     }
 
     /// <summary> Removes a message from the database and deletes the associated image file. </summary>
@@ -365,7 +386,8 @@ public class MessageOperations
                 doc.Save(_xmlFilePath);
             }
         }
-        File.Delete(Path.Combine(_channelDir, $"{originalMessageId}.jpg"));
+        File.Delete(Path.Combine(_channelDir, $"{originalMessageId}_descriptors.bin"));
+        File.Delete(Path.Combine(_channelDir, $"{originalMessageId}.json"));
     }
 
     /// <summary> Downloads an image from the given URL and processes it's similarity checks. </summary>
@@ -388,7 +410,7 @@ public class MessageOperations
     /// <returns>A task that represents the asynchronous operation.</returns>
     private async Task ProcessTitle(string title, string url)
     {
-        var originalMessageId = await GetExistingMessageIdFromBd(u =>
+        var originalMessageId = await GetExistingMessageId(u =>
             new Levenstein()
                 .GetSimilarity(
                     (u.Attribute("description")?.Value ?? "").ToLower(),
@@ -405,10 +427,6 @@ public class MessageOperations
         }
     }
 
-    /// <summary> Processes a stored image, checks for duplicates and sends a message to the chat if a duplicate is found. </summary>
-    /// <param name="filePath">The path of the stored image.</param>
-    /// <param name="url"></param>
-    /// <returns>A Boolean indicating whether a duplicate was found.</returns>
     private async Task<bool?> ProcessStoredImage(string? filePath, string url = "")
     {
         bool? ret;
@@ -423,27 +441,34 @@ public class MessageOperations
             {
                 using var resizedImage = Downscale(newImage);
 
-                var (originalMessageId, count, matchDemo) = await GetOriginalMessageIdAndSimilarity(resizedImage);
+                var newImageDescriptors = GetImageDescriptors(resizedImage, out var newKeyPoints);
+
+                var (originalMessageId, count, matchDemo) = await GetOriginalMessageIdAndSimilarity(newImageDescriptors, newKeyPoints).ConfigureAwait(false);
 
                 if (originalMessageId != 0)
                 {
-                    //var originalMessageLink = $"https://t.me/c/{chatId}/{originalMessageId}";
                     await SendInfo2Chat(originalMessageId, count, matchDemo);
                     ret = true;
                 }
                 else
                 {
-                    var fileName = $"{_messageId}.jpg";
-                    if (File.Exists(Path.Combine(_channelDir, fileName)))
+                    var fileName = $"{_messageId}";
+                    if (File.Exists(Path.Combine(_channelDir, $"{fileName}_descriptors")))
                     {
-                        fileName = $"{Path.GetFileNameWithoutExtension(fileName)}_{DateTime.Now.Ticks}.jpg";
+                        fileName = $"{Path.GetFileNameWithoutExtension(fileName)}_{DateTime.Now.Ticks}";
                     }
 
-                    Cv2.ImWrite(Path.Combine(_channelDir, fileName), resizedImage);
+                    Cv2.ImEncode(".jpg", newImageDescriptors, out var descriptorsBytes); // Serialize the descriptors
+                    var keyPointsBytes = SerializeKeyPoints(newKeyPoints); // Serialize the keypoints
+
+                    File.WriteAllBytes(Path.Combine(_channelDir, $"{fileName}_descriptors.jpg"), descriptorsBytes);
+                    File.WriteAllBytes(Path.Combine(_channelDir, $"{fileName}_keypoints"), keyPointsBytes);
+
                     ret = false;
                 }
 
                 matchDemo?.Release();
+                newImageDescriptors.Release();
                 resizedImage.Release();
                 newImage.Release();
             }
@@ -453,10 +478,32 @@ public class MessageOperations
             }
         }
 
-        File.Delete(filePath);
-
         return ret;
     }
+
+
+    private static byte[] SerializeKeyPoints(KeyPoint[] keypoints)
+    {
+        using (var ms = new MemoryStream())
+        using (var writer = new BinaryWriter(ms))
+        {
+            writer.Write(keypoints.Length);
+            foreach (var kp in keypoints)
+            {
+                writer.Write(kp.Angle);
+                writer.Write(kp.ClassId);
+                writer.Write(kp.Octave);
+                writer.Write(kp.Pt.X);
+                writer.Write(kp.Pt.Y);
+                writer.Write(kp.Response);
+                writer.Write(kp.Size);
+            }
+            return ms.ToArray();
+        }
+    }
+
+
+
 
     private async Task<bool> ProcessTextScreen(string url, Mat newImage)
     {
@@ -499,23 +546,29 @@ public class MessageOperations
         return (meanConfidence, length, text);
     }
 
-    /// <summary> Gets the duplicate message ID from the given message, channel directory, and new image descriptors. </summary>
-    /// <returns>The duplicate message ID, or 0 if no duplicate message ID was found.</returns>
-    private async Task<(int originalMessageId, int count, Mat? oldImage)> GetOriginalMessageIdAndSimilarity(Mat newImage)
+    private async Task<(int originalMessageId, int count, Mat? oldImage)> GetOriginalMessageIdAndSimilarity(Mat newImageDescriptors, KeyPoint[] newKeyPoints)
     {
-        var newImageDescriptors = GetImageDescriptors(newImage, out var newKeyPoints);
+        // var newImageDescriptors = GetImageDescriptors(newImage, out var newKeyPoints);
         var count = 0;
         Mat oldImage = null!;
         List<DMatch> matches = null!;
 
         KeyPoint[] oldKeyPoints = null!;
         var similarImageFile = Directory
-            .EnumerateFiles(_channelDir, "*.jpg")
+            .EnumerateFiles(_channelDir, "*_descriptors.bin")
             .OrderByDescending(Path.GetFileNameWithoutExtension)
             .FirstOrDefault(f =>
             {
-                oldImage = Cv2.ImRead(f, ImreadModes.Color);
-                var oldImageDescriptors = GetImageDescriptors(oldImage, out oldKeyPoints);
+                var descriptorsFile = f;
+                var keypointsFile = Path.ChangeExtension(f, ".json");
+
+                // Deserialize descriptors
+                byte[] bytes = File.ReadAllBytes(descriptorsFile);
+                Mat oldImageDescriptors = Cv2.ImDecode(bytes, ImreadModes.Color);
+
+                // Deserialize keypoints
+                string jsonKeyPoints = File.ReadAllText(keypointsFile);
+                oldKeyPoints = JsonConvert.DeserializeObject<KeyPoint[]>(jsonKeyPoints);
 
                 matches = CompareImages(oldImageDescriptors, newImageDescriptors);
                 var isMatched = matches.Count > SomeThreshold;
@@ -528,26 +581,27 @@ public class MessageOperations
 
         if (similarImageFile != null)
         {
-            var imgMatches = ImgMatches(matches, newImage, oldKeyPoints, oldImage, newKeyPoints);
+            // var imgMatches = ImgMatches(matches, newImage, oldKeyPoints, oldImage, newKeyPoints);
             similarImageFile = NormalizeFileName(similarImageFile);
 
             int.TryParse(Path.GetFileNameWithoutExtension(similarImageFile), out var originalMessageId);
 
             try
             {
-                originalMessageId = await IsMessageExistsOnline(originalMessageId) ? originalMessageId : 0;
+                originalMessageId = await GetMediaIfMessageExistsOnline(originalMessageId) ? originalMessageId : 0;
             }
             catch (Exception)
             {
                 originalMessageId = 0;
             }
 
-            return (originalMessageId, count, imgMatches);
+            return (originalMessageId, count, /*imgMatches*/ null);
         }
 
 
         return (0, 0, null!);
     }
+
 
     /// <summary>
     /// Draws matches between two images and returns the result as a Mat.
